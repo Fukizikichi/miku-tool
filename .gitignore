@@ -1,0 +1,33 @@
+# Bağımlılık klasörleri
+node_modules/
+venv/
+.cache/
+
+# Build ve release çıktıları
+dist/
+build/
+release/
+
+# İşletim sistemi dosyaları
+.DS_Store
+Thumbs.db
+
+# Çalıştırılabilir dosyalar
+*.exe
+
+# Gizli/yerel ayarlar
+config.json
+credentials.json
+*.log
+
+# İndirilen medya dosyaları
+downloads/
+
+# Editör / not klasörleri
+.obsidian/
+copilot/
+.idea/
+.vscode/
+
+__pycache__/
+*.pyc

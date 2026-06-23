@@ -1,0 +1,8 @@
+{
+  "download_path": "C:\\Users\\KullaniciAdi\\Downloads",
+  "cookie_browser": "you'll choose",
+  "match_threshold": 60,
+  "spotify_client_id": "put your client_id",
+  "spotify_client_secret": "put your client_secret",
+  "tray_on_close": false
+}
