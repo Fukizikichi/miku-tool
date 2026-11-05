@@ -1,11 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import sys
+import imageio_ffmpeg
 
+ffmpeg_bin_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 
 a = Analysis(
-    ['engine\\api.py'],
+    ['engine/api.py'],
     pathex=[],
-    datas=[('venv/Lib/site-packages/imageio_ffmpeg/binaries/*', 'imageio_ffmpeg/binaries')],
-    hiddenimports=['uvicorn.logging', 'uvicorn.loops.auto', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on'],
+    datas=[(os.path.join(ffmpeg_bin_dir, '*'), 'imageio_ffmpeg/binaries')],
+    hiddenimports=[
+        'uvicorn.logging',
+        'uvicorn.loops.auto',
+        'uvicorn.protocols.http.auto',
+        'uvicorn.protocols.websockets.auto',
+        'uvicorn.lifespan.on',
+        'engineio.async_drivers.threading',
+        'websockets',
+        'syncedlyrics',
+        'spotipy',
+        'mutagen',
+        'librespot',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -34,5 +50,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['public\\miku-icon.ico'],
+    icon=['public/miku-icon.ico'],
 )

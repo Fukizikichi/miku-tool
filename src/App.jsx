@@ -1,211 +1,14 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Download, History, Settings, Music, Video, Search, Share2, Loader2, PlayCircle, ExternalLink, CheckCircle2, X, XCircle, Eye, Music2, Radio, ShieldAlert, RefreshCw, Check, HelpCircle, Lock, LockOpen, FolderOpen, Play, Pause, Volume2, VolumeX, SkipBack, SkipForward, ListMusic } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Download, History, Settings, Music, Video, Search, Share2, Loader2, PlayCircle, ExternalLink, CheckCircle2, X, XCircle, Eye, Music2, Radio, ShieldAlert, RefreshCw, Check, HelpCircle, Lock, LockOpen, FolderOpen, Play, Pause, Volume2, VolumeX, SkipBack, SkipForward } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-// Optimized Search Result Component to prevent lag
-const SearchResultItem = React.memo(({ item, idx, setUrl, setSearchResults, setPreviewItem, cn }) => {
-  return (
-    <motion.div
-      initial={{ y: 5, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      transition={{ duration: 0.2 }}
-      onClick={() => {
-        setUrl(item.url);
-        setSearchResults([]);
-      }}
-      className="flex items-center gap-3 p-2 hover:bg-white/10 rounded-lg transition-all group cursor-pointer"
-    >
-      <div className="relative shrink-0 cursor-pointer" onClick={(e) => { e.stopPropagation(); setPreviewItem(item); }}>
-        <img src={item.thumbnail} className="w-24 h-14 object-cover rounded-md shadow-lg" alt="" />
-        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-md">
-          <PlayCircle size={28} className="text-white drop-shadow-lg" />
-        </div>
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          {item.platform === 'spotify' && <div className="w-4 h-4 bg-[#1DB954] rounded-full flex items-center justify-center shrink-0"><Music2 size={10} className="text-black" /></div>}
-          {item.platform === 'soundcloud' && <div className="w-4 h-4 bg-[#FF5500] rounded-full flex items-center justify-center shrink-0"><Radio size={10} className="text-white" /></div>}
-          {item.platform === 'youtube' && <div className="w-4 h-4 bg-[#FF0000] rounded-full flex items-center justify-center shrink-0"><PlayCircle size={10} className="text-white" /></div>}
-          <div className="text-sm font-bold truncate">{item.title}</div>
-        </div>
-        <div className="text-[10px] text-slate-500 flex items-center gap-2 mt-1 font-bold">
-          <span className="bg-white/5 px-1.5 py-0.5 rounded uppercase tracking-tighter">
-            {item.duration ? `${Math.floor(item.duration / 60)}:${String(Math.floor(item.duration % 60)).padStart(2, '0')}` : '--:--'}
-          </span>
-          <span className={cn(
-            "px-1.5 py-0.5 rounded uppercase tracking-tighter text-[8px]",
-            item.platform === 'spotify' ? 'bg-[#1DB954]/20 text-[#1DB954]' :
-            item.platform === 'soundcloud' ? 'bg-[#FF5500]/20 text-[#FF5500]' : 'bg-red-500/20 text-red-500'
-          )}>
-            {item.platform}
-          </span>
-          <span className="truncate uppercase opacity-60 ml-1">{item.uploader}</span>
-        </div>
-      </div>
-      <ExternalLink size={14} className="text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity ml-auto" />
-    </motion.div>
-  );
-});
-
-
-// Quick utility for conditional classes
-const cn = (...classes) => classes.filter(Boolean).join(' ');
-
-// ── AudioPlayer Component ────────────────────────────────────────────────
-const AudioPlayer = ({ player, onClose }) => {
-  const audioRef = useRef(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(0.8);
-  const [isMuted, setIsMuted] = useState(false);
-
-  useEffect(() => {
-    if (!player.src || !audioRef.current) return;
-    audioRef.current.src = player.src;
-    audioRef.current.volume = volume;
-    audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
-  }, [player.src]);
-
-  const fmt = (s) => {
-    const m = Math.floor((s || 0) / 60);
-    const sec = Math.floor((s || 0) % 60);
-    return `${m}:${String(sec).padStart(2, '0')}`;
-  };
-
-  const togglePlay = () => {
-    if (!audioRef.current) return;
-    if (isPlaying) { audioRef.current.pause(); setIsPlaying(false); }
-    else { audioRef.current.play(); setIsPlaying(true); }
-  };
-
-  const seek = (delta) => {
-    if (!audioRef.current) return;
-    audioRef.current.currentTime = Math.max(0, Math.min(duration, audioRef.current.currentTime + delta));
-  };
-
-  const onVolumeChange = (v) => {
-    setVolume(v);
-    setIsMuted(v === 0);
-    if (audioRef.current) audioRef.current.volume = v;
-  };
-
-  const toggleMute = () => {
-    if (!audioRef.current) return;
-    const next = !isMuted;
-    setIsMuted(next);
-    audioRef.current.volume = next ? 0 : volume;
-  };
-
-  return (
-    <motion.div
-      initial={{ y: 100, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      exit={{ y: 100, opacity: 0 }}
-      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-      className="fixed bottom-0 left-0 right-0 z-[90] flex items-center gap-4 px-6 py-3 backdrop-blur-xl border-t border-white/10 shadow-2xl"
-      style={{ background: 'linear-gradient(135deg, rgba(0,212,255,0.08) 0%, rgba(15,23,42,0.95) 60%, rgba(124,58,237,0.08) 100%)' }}
-    >
-      <audio
-        ref={audioRef}
-        onTimeUpdate={() => setCurrentTime(audioRef.current?.currentTime || 0)}
-        onDurationChange={() => setDuration(audioRef.current?.duration || 0)}
-        onEnded={() => setIsPlaying(false)}
-      />
-
-      {/* Track info */}
-      <div className="flex items-center gap-3 min-w-0 w-44 shrink-0">
-        <div className="w-9 h-9 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0">
-          <Music2 size={16} className="text-primary" />
-        </div>
-        <div className="min-w-0">
-          <div className="text-[11px] font-bold text-white truncate">{player.title || 'Bilinmeyen'}</div>
-          <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">MP3</div>
-        </div>
-      </div>
-
-      {/* Controls */}
-      <div className="flex flex-col flex-1 items-center gap-1.5 min-w-0">
-        <div className="flex items-center gap-3">
-          <button onClick={() => seek(-10)} className="text-slate-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-white/10">
-            <SkipBack size={16} />
-          </button>
-          <button
-            onClick={togglePlay}
-            className="w-10 h-10 rounded-full bg-primary flex items-center justify-center shadow-lg shadow-primary/30 hover:bg-primary/80 transition-all"
-          >
-            {isPlaying ? <Pause size={18} className="text-black" /> : <Play size={18} className="text-black ml-0.5" />}
-          </button>
-          <button onClick={() => seek(10)} className="text-slate-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-white/10">
-            <SkipForward size={16} />
-          </button>
-        </div>
-
-        {/* Scrubber */}
-        <div className="flex items-center gap-2 w-full max-w-md">
-          <span className="text-[10px] text-slate-500 font-bold tabular-nums w-8 text-right">{fmt(currentTime)}</span>
-          <div className="flex-1 relative group">
-            <input
-              type="range" min={0} max={duration || 1} step={0.5}
-              value={currentTime}
-              onChange={e => { audioRef.current.currentTime = Number(e.target.value); setCurrentTime(Number(e.target.value)); }}
-              className="w-full h-1 rounded-full appearance-none cursor-pointer"
-              style={{
-                background: `linear-gradient(to right, #00D4FF ${(currentTime/(duration||1))*100}%, rgba(255,255,255,0.1) 0%)`,
-                accentColor: '#00D4FF'
-              }}
-            />
-          </div>
-          <span className="text-[10px] text-slate-500 font-bold tabular-nums w-8">{fmt(duration)}</span>
-        </div>
-      </div>
-
-      {/* Volume + Close */}
-      <div className="flex items-center gap-3 w-36 shrink-0 justify-end">
-        <button onClick={toggleMute} className="text-slate-400 hover:text-white transition-colors">
-          {isMuted || volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
-        </button>
-        <input
-          type="range" min={0} max={1} step={0.05}
-          value={isMuted ? 0 : volume}
-          onChange={e => onVolumeChange(Number(e.target.value))}
-          className="w-20 h-1 rounded-full appearance-none cursor-pointer"
-          style={{
-            background: `linear-gradient(to right, #00D4FF ${(isMuted ? 0 : volume)*100}%, rgba(255,255,255,0.1) 0%)`,
-            accentColor: '#00D4FF'
-          }}
-        />
-        <button onClick={onClose} className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/15 flex items-center justify-center text-slate-400 hover:text-white transition-all border border-white/10">
-          <X size={12} />
-        </button>
-      </div>
-    </motion.div>
-  );
-};
-
-// Toast Notification Component
-const Toast = ({ message, visible, onHide }) => {
-  return (
-    <AnimatePresence>
-      {visible && (
-        <motion.div
-          initial={{ opacity: 0, y: 50, scale: 0.9 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: 20, scale: 0.9 }}
-          className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[100] bg-primary/90 backdrop-blur-md text-white px-6 py-3 rounded-2xl shadow-2xl border border-white/20 font-bold uppercase tracking-widest text-[10px] flex items-center gap-3"
-        >
-          <div className="w-5 h-5 bg-white/20 rounded-full flex items-center justify-center">
-            <Check size={12} />
-          </div>
-          {message}
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-};
-
+import SearchResultItem from './components/SearchResultItem';
+import AudioPlayer from './components/AudioPlayer';
+import Toast from './components/Toast';
+import DynamicMikuLogo from './components/DynamicMikuLogo';
+import { SidebarButton, FormatBtn } from './components/SidebarButton';
+import { cn } from './utils/cn';
 
 // Success sound (Standard modern notification ping using AudioContext)
 const playPing = () => {
@@ -224,123 +27,6 @@ const playPing = () => {
         oscillator.start(audioCtx.currentTime);
         oscillator.stop(audioCtx.currentTime + 0.5);
     } catch (e) { console.error("Audio error", e); }
-};
-
-// Dynamic Miku Logo Component
-const DynamicMikuLogo = ({ isPlaying, isDownloading }) => {
-  return (
-    <motion.div 
-      animate={{ 
-        y: [0, -3, 0],
-      }}
-      transition={{ repeat: Infinity, duration: 4, ease: "easeInOut" }}
-      className="w-16 h-16 flex items-center justify-center shrink-0 relative overflow-visible"
-    >
-      {/* Background Glow */}
-      <AnimatePresence>
-        {(isPlaying || isDownloading) && (
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 0.3, scale: 1.6 }}
-            exit={{ opacity: 0, scale: 0.8 }}
-            transition={{ repeat: Infinity, duration: 2, repeatType: "reverse" }}
-            className="absolute inset-0 bg-primary blur-3xl rounded-full z-0 pointer-events-none"
-          />
-        )}
-      </AnimatePresence>
-
-      <svg viewBox="0 0 40 40" className="w-14 h-14 z-10 overflow-visible" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="miku-hair-main" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#39C5BB" />
-            <stop offset="100%" stopColor="#1E90FF" />
-          </linearGradient>
-          <filter id="miku-glow">
-            <feGaussianBlur stdDeviation="1.5" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-        
-        {/* Left Twin Tail Group */}
-        <motion.g
-          animate={{ rotate: isPlaying || isDownloading ? [0, -12, 0, -12, 0] : [0, -2, 0, -2, 0] }}
-          style={{ transformOrigin: '14px 15px' }}
-          transition={{ repeat: Infinity, duration: isPlaying || isDownloading ? 1.5 : 4, ease: "easeInOut" }}
-        >
-          <path d="M14 15C14 15 2 15 2 32C2 38 12 38 12 32V15Z" fill="url(#miku-hair-main)" />
-          <rect x="10" y="11" width="5" height="7" rx="1" fill="#FF5D8F" filter="url(#miku-glow)" />
-        </motion.g>
-
-        {/* Right Twin Tail Group */}
-        <motion.g
-          animate={{ rotate: isPlaying || isDownloading ? [0, 12, 0, 12, 0] : [0, 2, 0, 2, 0] }}
-          style={{ transformOrigin: '26px 15px' }}
-          transition={{ repeat: Infinity, duration: isPlaying || isDownloading ? 1.5 : 4, ease: "easeInOut", delay: 0.1 }}
-        >
-          <path d="M26 15C26 15 38 15 38 32C38 38 28 38 28 32V15Z" fill="url(#miku-hair-main)" />
-          <rect x="25" y="11" width="5" height="7" rx="1" fill="#FF5D8F" filter="url(#miku-glow)" />
-        </motion.g>
-
-        {/* Head Group - Refined Anime Shape (V-Line) */}
-        <g className="head-group">
-          {/* Face (Realistic Skin Tone - Pale Porcelain) */}
-          <path d="M12 15C12 9 15 7 20 7C25 7 28 9 28 15C28 22 25 29 20 29.5C15 29 12 22 12 15Z" fill="#FFF9F0" />
-          
-          {/* Hair Bangs (Fringe) - Adjusted to new head width */}
-          <path d="M12 15C12 9 15 7 20 7C25 7 28 9 28 15L27 19.5L20 17.5L13 19.5L12 15Z" fill="url(#miku-hair-main)" />
-          <path d="M19.5 7V17.5" stroke="url(#miku-hair-main)" strokeWidth="1.5" strokeLinecap="round" />
-          
-          {/* Cyber Eyes - Centered horizontally in the new face shape */}
-          <motion.g 
-            animate={{ opacity: [0.6, 1, 0.6] }}
-            transition={{ repeat: Infinity, duration: 2 }}
-          >
-            {/* Left Eye */}
-            <path d="M15.5 20.5L17.5 22.5L15.5 24.5" stroke="#39C5BB" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
-            {/* Right Eye */}
-            <path d="M24.5 20.5L22.5 22.5L24.5 24.5" stroke="#39C5BB" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
-          </motion.g>
-
-          {/* Animated Mouth (Smile during download) */}
-          <path
-            d={isDownloading ? "M17 25 Q20 28 23 25" : "M18.5 26 Q20 26.5 21.5 26"}
-            stroke="#FF5D8F"
-            strokeWidth="0.8"
-            strokeLinecap="round"
-            fill={isDownloading ? "rgba(255,93,143,0.1)" : "none"}
-          />
-        </g>
-        
-        {/* Visible 01 Tattoo */}
-        <motion.text 
-            x="33" y="32" fill="#FF5D8F" fontSize="7" fontWeight="900" textAnchor="middle" style={{ fontFamily: 'sans-serif', filter: 'drop-shadow(0 0 2px rgba(255,93,143,0.5))' }}
-            animate={isDownloading ? { opacity: [0.5, 1, 0.5], scale: [1, 1.1, 1] } : { opacity: 0.8 }}
-            transition={{ repeat: Infinity, duration: 0.8 }}
-        >01</motion.text>
-
-        {/* Energy Flow Rings (Active Only) */}
-        {isDownloading && (
-            <motion.g>
-                {[0, 1, 2].map(i => (
-                    <motion.circle
-                        key={i}
-                        cx="20" cy="20" r="19"
-                        stroke="#39C5BB"
-                        strokeWidth="1"
-                        strokeDasharray="4 10"
-                        initial={{ rotate: 0, opacity: 0 }}
-                        animate={{ rotate: 360, opacity: [0, 0.7, 0], scale: [0.8, 1.4, 0.8] }}
-                        transition={{ repeat: Infinity, duration: 2.5, delay: i * 0.8, ease: "linear" }}
-                    />
-                ))}
-            </motion.g>
-        )}
-      </svg>
-    </motion.div>
-  );
 };
 
 const getErrorTip = (errorMessage) => {
@@ -498,12 +184,12 @@ export default function App() {
       if (logIntervalRef.current) clearInterval(logIntervalRef.current);
     }
     return () => { if (logIntervalRef.current) clearInterval(logIntervalRef.current); };
-  }, [activeTab, logAutoRefresh, logLineCount]);
+  }, [activeTab, logAutoRefresh, logLineCount]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ayarlar sekmesine ilk geçişte logları yükle
   useEffect(() => {
     if (activeTab === 'settings') fetchLogs(logLineCount);
-  }, [activeTab]);
+  }, [activeTab, logLineCount]); // eslint-disable-line react-hooks/exhaustive-deps
 
 
 
@@ -548,9 +234,12 @@ export default function App() {
     }
   }, []);
 
-  // Electron IPC
-  const isElectron = window && window.require;
-  const ipcRenderer = isElectron ? window.require('electron').ipcRenderer : null;
+  // Electron IPC — her render'da yeniden oluşturmamak için memoize ediliyor
+  const isElectron = !!(window && window.require);
+  const ipcRenderer = useMemo(
+    () => (isElectron ? window.require('electron').ipcRenderer : null),
+    [isElectron]
+  );
 
   const handleShowInFolder = useCallback(async (filename) => {
     if (ipcRenderer && filename) {
@@ -850,10 +539,11 @@ export default function App() {
         setTimeout(() => setSpotifyConnectStatus('idle'), 8000);
       } else {
         setSpotifyConnectStatus('error');
-        alert("Bağlantı hatası: " + data.message);
+        showToast('⚠️ Bağlantı hatası: ' + (data.message || 'Bilinmeyen hata'), 8000);
       }
     } catch(err) {
       setSpotifyConnectStatus('error');
+      showToast('⚠️ Bağlantı kurulamadı. Backend çalışıyor mu?', 6000);
     }
   };
 
@@ -2072,40 +1762,3 @@ export default function App() {
   );
 }
 
-
-function SidebarButton({ active, onClick, icon, label }) {
-  return (
-    <button 
-      onClick={onClick}
-      className={cn(
-        "flex items-center gap-3 px-4 py-4 rounded-2xl transition-all relative overflow-hidden group",
-        active ? 'text-primary font-semibold' : 'text-slate-500 hover:text-white'
-      )}
-    >
-      {active && <motion.div layoutId="sidebar-active-bg" className="absolute inset-0 bg-primary/5 z-0" />}
-      <span className="relative z-10">{icon}</span>
-      <span className="relative z-10 uppercase text-[9px] font-semibold tracking-wider">{label}</span>
-      {active && <motion.div layoutId="active-marker" className="absolute left-0 w-1.5 h-6 bg-primary rounded-r-full" />}
-    </button>
-  );
-}
-
-function FormatBtn({ active, onClick, icon, label, disabled }) {
-  return (
-    <button
-      onClick={disabled ? undefined : onClick}
-      disabled={disabled}
-      className={cn(
-          "flex-1 flex items-center justify-center gap-2 py-3 rounded-xl transition-all font-semibold uppercase text-[9px] tracking-wider border border-transparent",
-          disabled
-            ? 'opacity-30 cursor-not-allowed text-slate-600'
-            : active
-              ? 'bg-primary text-white shadow-xl shadow-primary/10'
-              : 'text-slate-500 hover:bg-white/5 hover:text-white'
-      )}
-    >
-      {icon}
-      <span>{label}</span>
-    </button>
-  );
-}

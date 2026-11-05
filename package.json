@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "description": "Modern Downloader built with Electron, React, Tailwind and Python",
   "main": "main.js",
+  "author": "Fukizikichi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Fukizikichi/miku-tool.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -11,35 +16,6 @@
     "dist:all": "npm run build && electron-builder",
     "dist:setup": "npm run build && electron-builder --win nsis",
     "dist:portable": "npm run build && electron-builder --dir"
-  },
-  "build": {
-    "appId": "com.mikutool.app",
-    "productName": "Miku Tool",
-    "directories": {
-      "output": "release"
-    },
-    "asar": false,
-    "files": [
-      "dist/**",
-      "main.js",
-      "public/**"
-    ],
-    "extraResources": [
-      "miku-engine.exe"
-    ],
-    "win": {
-      "target": ["dir", "nsis"],
-      "icon": "public/miku-icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Miku Tool",
-      "uninstallDisplayName": "Miku Tool",
-      "deleteAppDataOnUninstall": false
-    }
   },
   "dependencies": {
     "lottie-react": "^2.4.0",

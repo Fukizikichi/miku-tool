@@ -16,8 +16,18 @@ import sys
 # api.py'nin bulunduğu dizini arama yoluna ekle
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Dynamic packages directory in user AppData (allows updating yt-dlp at runtime)
-USER_DATA_DIR = os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'Miku Tool')
+def get_user_data_dir() -> str:
+    """Evrensel kullanıcı veri dizinini döndürür."""
+    if sys.platform == 'win32':
+        base = os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming')
+        return os.path.join(base, 'Miku Tool')
+    elif sys.platform == 'darwin':
+        return os.path.expanduser('~/Library/Application Support/Miku Tool')
+    else:
+        base = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
+        return os.path.join(base, 'miku-tool')
+
+USER_DATA_DIR = get_user_data_dir()
 PACKAGES_DIR = os.path.join(USER_DATA_DIR, 'packages')
 if not os.path.exists(PACKAGES_DIR):
     try:
@@ -32,7 +42,7 @@ try:
 except ModuleNotFoundError:
     import downloader, tagger
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = os.path.join(USER_DATA_DIR, "config.json")
 
 app = FastAPI()
 app.add_middleware(
@@ -61,28 +71,45 @@ def log_api(message):
 log_api("Python backend başlatıldı.")
 
 
-def get_local_ip():
+_cached_local_ip: str | None = None
+
+def get_local_ip() -> str:
+    """Yerel IP adresini döndürür; başlangıçta bir kez hesaplanır ve önbelleğe alınır."""
+    global _cached_local_ip
+    if _cached_local_ip:
+        return _cached_local_ip
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(('8.8.8.8', 80))
-        ip = s.getsockname()[0]
+        _cached_local_ip = s.getsockname()[0]
         s.close()
-        return ip
     except Exception:
-        return '127.0.0.1'
+        _cached_local_ip = '127.0.0.1'
+    return _cached_local_ip
 
 
-HISTORY_FILE = "history.json"
+HISTORY_FILE = os.path.join(USER_DATA_DIR, "history.json")
 
 def get_config():
+    default_downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
     base = {
-        "download_path": os.path.join(os.path.expanduser('~'), 'Downloads'),
+        "download_path": default_downloads,
         "cookie_browser": "none",
         "match_threshold": 60,
     }
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            base.update(json.load(f))
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                base.update(json.load(f))
+        except Exception:
+            pass
+    # Geçersiz veya erişilemeyen download_path varsa otomatik düzelt
+    dl_path = base.get("download_path")
+    if not dl_path or not os.path.exists(dl_path):
+        try:
+            os.makedirs(dl_path, exist_ok=True)
+        except Exception:
+            base["download_path"] = default_downloads
     return base
 
 
@@ -209,8 +236,11 @@ async def config_post(req: ConfigRequest):
     if req.download_path:
         conf['download_path'] = req.download_path
     conf['cookie_browser'] = req.cookie_browser
-    conf['spotify_client_id'] = req.spotify_client_id
-    conf['spotify_client_secret'] = req.spotify_client_secret
+    # None gelen değerler mevcut geçerli kimlik bilgilerinin üzerine yazmamalı
+    if req.spotify_client_id is not None:
+        conf['spotify_client_id'] = req.spotify_client_id
+    if req.spotify_client_secret is not None:
+        conf['spotify_client_secret'] = req.spotify_client_secret
     conf['match_threshold'] = req.match_threshold
     save_config(conf)
     return {"status": "success"}
@@ -458,29 +488,30 @@ async def websocket_endpoint(websocket: WebSocket):
     if not success:
         return
 
+    last_sent_snapshot: str = ""
+
     try:
         while True:
-            # Sadece bu bağlantıya güncel progress'i gönder (broadcast her loop'ta gereksiz)
+            # Sadece veri değiştiğinde gönder — gereksiz CPU ve ağ kullanımını önler
             if downloader.download_progress:
                 try:
-                    await websocket.send_json(downloader.download_progress)
+                    current_snapshot = json.dumps(downloader.download_progress, sort_keys=True)
+                    if current_snapshot != last_sent_snapshot:
+                        await websocket.send_json(downloader.download_progress)
+                        last_sent_snapshot = current_snapshot
                 except Exception:
-                    break # Gönderilemiyorsa bağlantı kopmuş olabilir
+                    break  # Gönderilemiyorsa bağlantı kopmuş
 
-            # Bağlantı durumunu kontrol et ve disconnect'i yakala
+            # Bağlantı durumunu kontrol et
             try:
-                # receive_text() bağlantı koptuğunda hata fırlatır
                 await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
             except asyncio.TimeoutError:
-                # Timeout normal, döngü devam eder
                 pass
             except Exception:
-                # Disconnect veya diğer hatalar
                 break
 
-            await asyncio.sleep(0.5) # CPU kullanımını azaltmak için kısa bekleme
-    except Exception as e:
-        # Sessizce kapat (log kirliliği yapmamak için)
+            await asyncio.sleep(0.5)
+    except Exception:
         pass
     finally:
         manager.disconnect(websocket)

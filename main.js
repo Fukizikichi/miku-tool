@@ -3,7 +3,7 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('disable-gpu-sandbox');
-app.commandLine.appendSwitch('no-sandbox');
+// 'no-sandbox' kald\u0131r\u0131ld\u0131 \u2014 Chrome sandbox'u devre d\u0131\u015f\u0131 b\u0131rakmak gereksiz bir g\u00fcvenlik riski olu\u015fturur.
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -170,7 +170,8 @@ function createWindow() {
   // Clipboard izle
   let lastText = clipboard.readText();
   const DOMAINS = ['youtube.com', 'youtu.be', 'spotify.com', 'soundcloud.com',
-    'tiktok.com', 'instagram.com', 'twitter.com', 'x.com', 'facebook.com', 'fb.watch'];
+    'tiktok.com', 'instagram.com', 'twitter.com', 'x.com', 'facebook.com', 'fb.watch',
+    'pinterest.com', 'pin.it', 'vimeo.com', 'reddit.com'];
   setInterval(() => {
     const text = clipboard.readText();
     if (text !== lastText && text && DOMAINS.some(d => text.includes(d))) {
@@ -190,7 +191,15 @@ function startPythonBackend() {
   let args = [];
 
   if (!app.isPackaged) {
-    backendPath = path.join(__dirname, 'venv', 'Scripts', 'python.exe');
+    const winVenv = path.join(__dirname, 'venv', 'Scripts', 'python.exe');
+    const unixVenv = path.join(__dirname, 'venv', 'bin', 'python');
+    if (fs.existsSync(winVenv)) {
+      backendPath = winVenv;
+    } else if (fs.existsSync(unixVenv)) {
+      backendPath = unixVenv;
+    } else {
+      backendPath = process.platform === 'win32' ? 'python' : 'python3';
+    }
     args = ['-m', 'uvicorn', 'engine.api:app', '--host', '0.0.0.0', '--port', '8000'];
   } else {
     backendPath = path.join(process.resourcesPath, 'miku-engine.exe');

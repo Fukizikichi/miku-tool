@@ -1,6 +1,7 @@
 # Bağımlılık klasörleri
 node_modules/
 venv/
+.venv/
 .cache/
 
 # Build ve release çıktıları
@@ -11,17 +12,30 @@ release/
 # İşletim sistemi dosyaları
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Çalıştırılabilir dosyalar
+# Çalıştırılabilir ve ikili dosyalar
 *.exe
+miku-engine.exe
 
-# Gizli/yerel ayarlar
+# Gizli / yerel ayarlar ve sertifikalar
 config.json
 credentials.json
 *.log
+certs/
+*.pfx
+*.pem
+*.key
+.env
+.env.*
 
-# İndirilen medya dosyaları
+# İndirilen medya ve test dosyaları
 downloads/
+*.mp4
+*.mp3
+*.ogg
+*.m4a
+*.webm
 
 # Editör / not klasörleri
 .obsidian/
@@ -29,5 +43,8 @@ copilot/
 .idea/
 .vscode/
 
+# Python derleme ve geçici dosyaları
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/

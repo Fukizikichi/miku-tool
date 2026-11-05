@@ -2,14 +2,24 @@ import sys
 import os
 import json
 
-# Dynamic packages directory in user AppData (allows updating yt-dlp at runtime)
-USER_DATA_DIR = os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'Miku Tool')
+def get_user_data_dir() -> str:
+    """Evrensel kullanıcı veri dizinini döndürür."""
+    if sys.platform == 'win32':
+        base = os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming')
+        return os.path.join(base, 'Miku Tool')
+    elif sys.platform == 'darwin':
+        return os.path.expanduser('~/Library/Application Support/Miku Tool')
+    else:
+        base = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
+        return os.path.join(base, 'miku-tool')
+
+USER_DATA_DIR = get_user_data_dir()
 PACKAGES_DIR = os.path.join(USER_DATA_DIR, 'packages')
 if not os.path.exists(PACKAGES_DIR):
     try:
         os.makedirs(PACKAGES_DIR)
-    except:
-        pass
+    except Exception as e:
+        pass  # Yetki sorunu varsa devam et
 if os.path.exists(PACKAGES_DIR) and PACKAGES_DIR not in sys.path:
     sys.path.insert(0, PACKAGES_DIR)
 
@@ -42,7 +52,7 @@ def log_debug(message: str) -> None:
     try:
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.datetime.now()}] {message}\n")
-    except:
+    except Exception:
         pass
 
 
@@ -73,10 +83,13 @@ def update_progress(url, data):
 
 
 def get_config():
-    conf_path = "config.json"
+    conf_path = os.path.join(USER_DATA_DIR, "config.json")
     if os.path.exists(conf_path):
-        with open(conf_path, "r") as f:
-            return json.load(f)
+        try:
+            with open(conf_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            log_debug(f"Config okuma hatası: {e}")
     return {}
 
 def get_spotify_credentials():
@@ -322,6 +335,9 @@ def process_spotify_url(url):
     """
     url = clean_spotify_url(url)
     
+    if 'spotify.com' not in url:
+        return [([url], None, None, url)]
+        
     # 429 hatalarını ve gereksiz API yükünü önlemek için önbellek kontrolü
     if url in spotify_url_cache:
         log_debug(f"Önbellekten Spotify verisi yükleniyor: {url}")
@@ -760,6 +776,27 @@ def _load_stream_with_alternatives(session, track_id, audio_quality, track_id_st
     raise Exception("Cannot get alternative track — Tüm alternatifler denendi, hiçbiri yüklenemedi.")
 
 
+def resolve_output_dir(target_dir):
+    """Hedef indirme klasörünü çözer. Geçersiz, silinmiş veya izin verilmeyen yollarda güvenle Downloads klasörüne düşer."""
+    default_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
+    if not target_dir or target_dir == 'downloads':
+        conf = get_config()
+        target_dir = conf.get('download_path') or default_dir
+    try:
+        abs_target = os.path.abspath(os.path.expanduser(target_dir))
+        os.makedirs(abs_target, exist_ok=True)
+        return abs_target
+    except Exception as e:
+        log_debug(f"Hedef klasör oluşturulamadı ({target_dir}): {e}. Varsayılan Downloads klasörüne geçiliyor.")
+        try:
+            os.makedirs(default_dir, exist_ok=True)
+            return default_dir
+        except Exception:
+            fallback = os.path.abspath('downloads')
+            os.makedirs(fallback, exist_ok=True)
+            return fallback
+
+
 def download_via_librespot_direct(track_url, output_dir, quality, meta=None):
     """
     Downloads a Spotify track directly using librespot Python API.
@@ -772,8 +809,7 @@ def download_via_librespot_direct(track_url, output_dir, quality, meta=None):
     track_url = clean_spotify_url(track_url)  # Strip ?si= params
     log_debug(f"Librespot doğrudan indirme başlatıldı: {track_url}")
     
-    abs_output_dir = os.path.abspath(output_dir)
-    os.makedirs(abs_output_dir, exist_ok=True)
+    abs_output_dir = resolve_output_dir(output_dir)
     
     # Extract track ID from URL
     track_id_match = re.search(r'track/([a-zA-Z0-9]+)', track_url)
@@ -1059,9 +1095,7 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
         
         # 2. Iterate and download each track
         conf = get_config()
-
-        if output_dir == 'downloads':
-            output_dir = conf.get('download_path', 'downloads')
+        output_dir = resolve_output_dir(output_dir)
 
         for queries, target_duration, meta_tuple, track_url in track_list:
             if input_url in cancelled_urls:
@@ -1124,8 +1158,8 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                 else:
                     target_title, target_artist, target_album = "Medya", "Bilinmiyor", "Bilinmiyor"
                 
-                # Check if it's already a direct video/audio URL (YouTube, SoundCloud, Instagram, TikTok, Twitter etc)
-                if any(x in queries[0] for x in DIRECT_URL_DOMAINS):
+                # Herhangi bir http/https URL'si (Spotify hariç) doğrudan medya bağlantısı olarak işlenir
+                if queries[0].startswith(('http://', 'https://')):
                     download_url = queries[0]
                     log_debug(f"Doğrudan URL tespiti: {download_url}")
                 
@@ -1184,7 +1218,8 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                         with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
                             try:
                                 search_results = ydl.extract_info(full_query, download=False)
-                            except: continue
+                            except Exception:
+                                continue
                             
                             if search_results and 'entries' in search_results:
                                 raw_entries = search_results['entries']
@@ -1257,8 +1292,7 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                         
                         log_debug(f"Kullanıcı onayladı, devam ediliyor: {track_url}")
 
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
+                output_dir = resolve_output_dir(output_dir)
                 ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
                 # PyInstaller fallback check
                 if not os.path.exists(ffmpeg_path) and hasattr(sys, '_MEIPASS'):
@@ -1315,18 +1349,7 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                     )
                     ydl_opts['merge_output_format'] = 'mp4'
 
-                # Platforms requiring login always use browser cookies
-                LOGIN_REQUIRED_DOMAINS = ['instagram.com', 'facebook.com', 'fb.watch', 'tiktok.com', 'twitter.com', 'x.com']
-                needs_login = any(d in (download_url or '') for d in LOGIN_REQUIRED_DOMAINS)
-                if needs_login and (not cookie_browser or cookie_browser == 'none'):
-                    # Kullanıcıya açık uyarı ver: bu platform giriş gerektiriyor
-                    platform_name = next((d.split('.')[0].capitalize() for d in LOGIN_REQUIRED_DOMAINS if d in (download_url or '')), 'Bu platform')
-                    update_progress(track_url, {
-                        "status": "error",
-                        "message": f"{platform_name} özel içerik indirme için tarayıcı girişi gerekiyor. "
-                                   f"Ayarlar > Oturum Yönetimi (Cookies) bölümünden giriş yaptığınız tarayıcıyı seçin."
-                    })
-                    continue
+                # Tarayıcı çerezleri ayarlanmışsa yt-dlp'ye aktar (özel/giriş gerektiren içerikler için)
                 if cookie_browser and cookie_browser != 'none':
                     ydl_opts['cookiesfrombrowser'] = (cookie_browser,)
 
@@ -1350,7 +1373,8 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                                 'cover_url': info.get('thumbnail'),
                                 'duration_s': info.get('duration', 0)
                             }
-                        except: pass
+                        except Exception:
+                            pass
 
                     ydl.download([download_url])
 
@@ -1468,8 +1492,20 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
 
 
             except Exception as e:
-                log_debug(f"Parça indirme hatası ({track_url}): {str(e)}")
-                update_progress(track_url, {"status": "error", "message": str(e)})
+                err_msg = str(e)
+                log_debug(f"Parça indirme hatası ({track_url}): {err_msg}")
+                
+                # Özel/giriş gerektiren içerik hatası tespiti
+                err_lower = err_msg.lower()
+                if any(k in err_lower for k in ['login', 'cookie', 'private', 'sign in', 'account', 'giriş']):
+                    err_msg = ("Bu içerik özel veya giriş gerektiriyor. "
+                               "Ayarlar > Oturum Yönetimi (Cookies) bölümünden giriş yaptığınız tarayıcıyı seçerek tekrar deneyin.")
+                
+                update_progress(track_url, {"status": "error", "message": err_msg})
+            finally:
+                # Bellek sızıntısını önle: işlem sonrası olay/sonuç kayıtlarını temizle
+                confirmation_events.pop(track_url, None)
+                confirmation_results.pop(track_url, None)
 
 
         # Finish collection
