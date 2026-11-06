@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Download, History, Settings, Music, Video, Search, Share2, Loader2, PlayCircle, ExternalLink, CheckCircle2, X, XCircle, Eye, Music2, Radio, ShieldAlert, RefreshCw, Check, HelpCircle, Lock, LockOpen, FolderOpen, Play, Pause, Volume2, VolumeX, SkipBack, SkipForward } from 'lucide-react';
+import { Download, History, Settings, Music, Video, Search, Share2, Loader2, PlayCircle, ExternalLink, CheckCircle2, X, XCircle, Eye, Music2, Radio, ShieldAlert, RefreshCw, Check, HelpCircle, Lock, LockOpen, FolderOpen, Play, Pause, Volume2, VolumeX, SkipBack, SkipForward, Zap, Clock, Sparkles } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -10,23 +10,46 @@ import DynamicMikuLogo from './components/DynamicMikuLogo';
 import { SidebarButton, FormatBtn } from './components/SidebarButton';
 import { cn } from './utils/cn';
 
-// Success sound (Standard modern notification ping using AudioContext)
+// Hatsune Miku Melodik Synth Arpej Bildirim Sesi (C5 -> E5 -> G5 -> C6)
 const playPing = () => {
     try {
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         if (audioCtx.state === 'suspended') audioCtx.resume();
-        const oscillator = audioCtx.createOscillator();
-        const gainNode = audioCtx.createGain();
-        oscillator.connect(gainNode);
-        gainNode.connect(audioCtx.destination);
-        oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
-        gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-        gainNode.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.01);
-        gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
-        oscillator.start(audioCtx.currentTime);
-        oscillator.stop(audioCtx.currentTime + 0.5);
+        const notes = [523.25, 659.25, 783.99, 1046.50];
+        const now = audioCtx.currentTime;
+
+        notes.forEach((freq, idx) => {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'triangle'; // Sıcak retro-anime synth tonu
+            osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+
+            gain.gain.setValueAtTime(0, now + idx * 0.08);
+            gain.gain.linearRampToValueAtTime(0.18, now + idx * 0.08 + 0.015);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.08 + (idx === 3 ? 0.6 : 0.25));
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start(now + idx * 0.08);
+            osc.stop(now + idx * 0.08 + (idx === 3 ? 0.65 : 0.3));
+        });
     } catch (e) { console.error("Audio error", e); }
+};
+
+const formatSpeed = (bytesPerSec) => {
+    if (!bytesPerSec || bytesPerSec <= 0) return null;
+    if (bytesPerSec >= 1024 * 1024) {
+        return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
+    }
+    return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+};
+
+const formatEta = (seconds) => {
+    if (!seconds || seconds <= 0 || seconds > 36000) return null;
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
 };
 
 const getErrorTip = (errorMessage) => {
@@ -100,6 +123,7 @@ export default function App() {
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const searchTimeoutRef = useRef(null);
+  const searchAbortControllerRef = useRef(null);
 
   // Preview Modal
   const [previewItem, setPreviewItem] = useState(null);
@@ -122,6 +146,8 @@ export default function App() {
   const [isFetchingInfo, setIsFetchingInfo] = useState(false);
   const [historyList, setHistoryList] = useState([]);
   const [toast, setToast] = useState({ message: '', visible: false });
+  const [historySearch, setHistorySearch] = useState('');
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   // Audio Player state
   const [player, setPlayer] = useState({ src: null, title: '', isOpen: false });
@@ -226,8 +252,8 @@ export default function App() {
       .then(data => { if (data && Array.isArray(data)) setHistoryList(data); })
       .catch(() => {});
 
-    // Electron sistem ayarlarını oku
-    const ipc = (window && window.require) ? window.require('electron').ipcRenderer : null;
+    // Electron sistem ayarlarını oku (Güvenli preload API veya legacy require)
+    const ipc = (window && (window.electronAPI || (window.require ? window.require('electron').ipcRenderer : null)));
     if (ipc) {
       ipc.invoke('get-tray-enabled').then(r => setTrayEnabled(r.enabled)).catch(() => {});
       ipc.invoke('get-auto-launch').then(r => setAutoLaunchEnabled(r.enabled)).catch(() => {});
@@ -235,9 +261,9 @@ export default function App() {
   }, []);
 
   // Electron IPC — her render'da yeniden oluşturmamak için memoize ediliyor
-  const isElectron = !!(window && window.require);
+  const isElectron = !!(window && (window.electronAPI || window.require));
   const ipcRenderer = useMemo(
-    () => (isElectron ? window.require('electron').ipcRenderer : null),
+    () => (window.electronAPI || (window.require ? window.require('electron').ipcRenderer : null)),
     [isElectron]
   );
 
@@ -301,15 +327,25 @@ export default function App() {
     }
   }, []);
 
-  // Debounced Search
+  // Debounced Search with AbortController and instant caching
   useEffect(() => {
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    if (searchAbortControllerRef.current) {
+      searchAbortControllerRef.current.abort();
+      searchAbortControllerRef.current = null;
+    }
 
-    if (url && !url.startsWith('http')) {
+    const trimmed = url ? url.trim() : '';
+
+    if (trimmed && !trimmed.startsWith('http') && trimmed.length >= 2) {
       setIsSearching(true);
       searchTimeoutRef.current = setTimeout(async () => {
+        const controller = new AbortController();
+        searchAbortControllerRef.current = controller;
         try {
-          const res = await fetch(`http://localhost:8000/api/search?q=${encodeURIComponent(url)}`);
+          const res = await fetch(`http://localhost:8000/api/search?q=${encodeURIComponent(trimmed)}`, {
+            signal: controller.signal
+          });
           const data = await res.json();
           if (Array.isArray(data)) {
             setSearchResults(data);
@@ -317,15 +353,28 @@ export default function App() {
             setSearchResults([]);
           }
         } catch (e) {
-          console.error("Search failed", e);
+          if (e.name !== 'AbortError') {
+            console.error("Search failed", e);
+            setSearchResults([]);
+          }
         } finally {
-          setIsSearching(false);
+          if (searchAbortControllerRef.current === controller) {
+            setIsSearching(false);
+            searchAbortControllerRef.current = null;
+          }
         }
-      }, 1000); 
+      }, 250); 
     } else {
       setSearchResults([]);
       setIsSearching(false);
     }
+
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+      if (searchAbortControllerRef.current) {
+        searchAbortControllerRef.current.abort();
+      }
+    };
   }, [url]);
 
   // Sync Progress — Playlist'ler için birleşik progress hesapla
@@ -547,6 +596,43 @@ export default function App() {
     }
   };
 
+  const filteredHistory = useMemo(() => {
+    if (!historySearch.trim()) return historyList;
+    const q = historySearch.toLowerCase();
+    return historyList.filter(item => 
+      (item.display_name && item.display_name.toLowerCase().includes(q)) ||
+      (item.filename && item.filename.toLowerCase().includes(q)) ||
+      (item.url && item.url.toLowerCase().includes(q))
+    );
+  }, [historyList, historySearch]);
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      const res = await fetch('https://api.github.com/repos/Fukizikichi/miku-tool/releases/latest');
+      if (!res.ok) {
+        if (res.status === 404) {
+          showToast('Henüz yayınlanmış bir GitHub Release bulunmuyor.');
+        } else {
+          showToast('Güncelleme kontrolü yapılamadı.');
+        }
+        return;
+      }
+      const data = await res.json();
+      const latestTag = data.tag_name || '';
+      const currentVersion = 'v1.0.0';
+      if (latestTag && latestTag !== currentVersion) {
+        showToast(`🎉 Yeni sürüm yayınlandı: ${latestTag}!`);
+      } else {
+        showToast('✓ En güncel sürümü kullanıyorsunuz (v1.0.0).');
+      }
+    } catch (e) {
+      showToast('Güncelleme kontrolü sırasında ağ hatası oluştu.');
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-slate-900 overflow-hidden relative text-white font-sans">
       {/* Background Orbs */}
@@ -671,7 +757,7 @@ export default function App() {
                   <div className="relative group">
                     <input 
                       type="text" 
-                      placeholder="YouTube, Spotify, Instagram veya TikTok linki..." 
+                      placeholder="Medya linki yapıştırın (YouTube, Spotify, Instagram, Dailymotion...) veya şarkı arayın..." 
                       value={url}
                       onChange={(e) => setUrl(e.target.value)}
                       disabled={progress && ['downloading', 'searching', 'expanding', 'postprocessing'].includes(progress.status)}
@@ -683,7 +769,7 @@ export default function App() {
                       )}
                     />
                     <div className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-primary transition-colors">
-                      {isFetchingInfo ? <Loader2 size={24} className="animate-spin text-primary" /> : <Search size={24} />}
+                      {(isFetchingInfo || isSearching) ? <Loader2 size={24} className="animate-spin text-primary" /> : <Search size={24} />}
                     </div>
                     {url && !(progress && ['downloading', 'searching', 'expanding', 'postprocessing'].includes(progress.status)) && (
                         <button 
@@ -696,6 +782,11 @@ export default function App() {
                     {isFetchingInfo && (
                         <div className="absolute -bottom-6 left-2 flex items-center gap-2">
                             <span className="text-[10px] font-bold text-primary uppercase tracking-[0.2em] animate-pulse">Link Analiz Ediliyor...</span>
+                        </div>
+                    )}
+                    {isSearching && !isFetchingInfo && (
+                        <div className="absolute -bottom-6 left-2 flex items-center gap-2">
+                            <span className="text-[10px] font-bold text-primary uppercase tracking-[0.2em] animate-pulse">Sonuçlar Aranıyor...</span>
                         </div>
                     )}
                   </div>
@@ -847,6 +938,24 @@ export default function App() {
                             />
                         </div>
 
+                        {/* Hız ve Kalan Süre Göstergesi */}
+                        {progress.status === 'downloading' && (progress.speed || progress.eta) && (
+                          <div className="flex items-center justify-between mt-2.5 px-1 text-[11px] font-mono">
+                            {progress.speed > 0 ? (
+                              <span className="flex items-center gap-1.5 text-primary font-semibold">
+                                <Zap size={12} className="text-primary animate-pulse" />
+                                {formatSpeed(progress.speed)}
+                              </span>
+                            ) : <span />}
+                            {progress.eta > 0 && (
+                              <span className="flex items-center gap-1.5 text-slate-400 font-medium">
+                                <Clock size={12} className="text-slate-500" />
+                                {formatEta(progress.eta)} kaldı
+                              </span>
+                            )}
+                          </div>
+                        )}
+
                         {/* Cancel Button — only while downloading */}
                         <AnimatePresence>
                           {progress.status === 'downloading' && (
@@ -934,7 +1043,7 @@ export default function App() {
                 exit={{ opacity: 0, x: -20 }}
                 className="w-full"
               >
-                <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-semibold tracking-[0.15em] uppercase text-slate-200">İŞLEMLER & GEÇMİŞ</h2>
                   <button 
                     onClick={async () => {
@@ -943,6 +1052,7 @@ export default function App() {
                         await fetch('http://localhost:8000/api/clear_progress', { method: 'POST' });
                         setAllDownloads({});
                         setHistoryList([]);
+                        setHistorySearch('');
                         showToast('✓ Liste temizlendi.');
                       } catch(e) { showToast('⚠️ Hata oluştu.'); }
                     }}
@@ -951,15 +1061,41 @@ export default function App() {
                     LİSTEYİ SIFIRLA
                   </button>
                 </div>
+
+                {historyList.length > 0 && (
+                  <div className="relative mb-6">
+                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500" size={14} />
+                    <input
+                      type="text"
+                      placeholder="Geçmişte filtrele (şarkı adı, sanatçı, dosya)..."
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                      className="w-full bg-white/5 border border-white/10 rounded-2xl pl-10 pr-9 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-primary/50 transition-colors"
+                    />
+                    {historySearch && (
+                      <button
+                        onClick={() => setHistorySearch('')}
+                        className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white text-xs"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                )}
                 
                 {historyList.length === 0 ? (
                   <div className="glass-panel p-20 text-center flex flex-col items-center gap-4 opacity-40">
                     <History size={64} />
                     <p className="text-lg font-bold uppercase tracking-widest">Henüz bir işlem yok.</p>
                   </div>
+                ) : filteredHistory.length === 0 ? (
+                  <div className="glass-panel p-12 text-center flex flex-col items-center gap-3 opacity-50">
+                    <Search size={36} className="text-slate-500" />
+                    <p className="text-sm font-semibold">"{historySearch}" ile eşleşen bir indirme bulunamadı.</p>
+                  </div>
                 ) : (
                   <div className="flex flex-col gap-3">
-                    {historyList.map((item, i) => (
+                    {filteredHistory.map((item, i) => (
                       <motion.div 
                         layout
                         key={item.url || i} 
@@ -1431,18 +1567,51 @@ export default function App() {
                            </button>
                          </div>
 
+                         <div className="h-px bg-white/5" />
+
+                         {/* Miku Melodisi (İndirme Tamamlandı Sesi) */}
+                         <div className="flex items-center justify-between">
+                           <div>
+                             <p className="text-sm font-semibold text-white">Miku Melodisi (Bildirim Sesi)</p>
+                             <p className="text-[11px] text-slate-500 mt-0.5">İndirme tamamlandığında çalınan Hatsune Miku arpej synth sesi.</p>
+                           </div>
+                           <button
+                             onClick={() => {
+                               playPing();
+                               showToast('🎵 Miku bildirim melodisi çalındı!');
+                             }}
+                             className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-primary/10 border border-primary/20 text-xs font-semibold text-primary hover:bg-primary/20 transition-all cursor-pointer"
+                           >
+                             <Volume2 size={13} />
+                             Dinle
+                           </button>
+                         </div>
+
                        </div>
                      </section>
 
                      <div className="h-px bg-white/5" />
 
-                     {/* Hakkında */}
-                     <section className="text-center py-4">
-                         <p className="text-xs font-bold tracking-[0.3em] text-slate-600 uppercase mb-1">Miku Tool</p>
-                         <p className="text-[10px] text-slate-700 tracking-widest">v1.0.0 — Kişisel Kullanım</p>
-                         <p className="text-[10px] text-slate-700 mt-2">YouTube • Spotify • SoundCloud • TikTok • Instagram</p>
+                     {/* Hakkında & Güncelleme Denetimi */}
+                     <section className="bg-white/3 p-6 rounded-3xl border border-white/5 flex flex-col items-center justify-center text-center">
+                         <div className="flex items-center gap-2 mb-1.5">
+                           <Sparkles size={16} className="text-primary animate-pulse" />
+                           <p className="text-xs font-bold tracking-[0.25em] text-white uppercase">Miku Tool</p>
+                           <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20 font-bold">v1.0.0</span>
+                         </div>
+                         <p className="text-[11px] text-slate-400 max-w-sm mb-4">
+                           YouTube, Spotify, SoundCloud, Dailymotion, Instagram ve TikTok için modern, güvenli ve evrensel medya indirici.
+                         </p>
+                         <button
+                           onClick={handleCheckUpdate}
+                           disabled={checkingUpdate}
+                           className="flex items-center gap-2 px-5 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-slate-200 hover:text-white transition-all cursor-pointer shadow-lg active:scale-95"
+                         >
+                           <RefreshCw size={12} className={cn(checkingUpdate && "animate-spin text-primary")} />
+                           {checkingUpdate ? 'Kontrol Ediliyor...' : 'Güncellemeleri Denetle'}
+                         </button>
                      </section>
-                 </div>
+                  </div>
               </motion.div>
             )}
           </AnimatePresence>

@@ -12,17 +12,19 @@ echo  [1] Gelistirici Modunda Baslat (Vite + Electron Dev)
 echo  [2] Sadece Backend Derle (miku-engine.exe)
 echo  [3] Tum Projeyi Derle ve Paketle (Yukleyici Olustur)
 echo  [4] Bagimliliklari Kur/Guncelle (Node + Python)
-echo  [5] Projeyi Temizle (Gereksiz Dosyalari Sil)
-echo  [6] Cikis
+echo  [5] Kurulu Uygulamayi Guncelle (Hizli Senkronizasyon)
+echo  [6] Projeyi Temizle (Gereksiz Dosyalari Sil)
+echo  [7] Cikis
 echo ==========================================
-set /p secim="Seciminiz (1-6): "
+set /p secim="Seciminiz (1-7): "
 
 if "%secim%"=="1" goto start_dev
 if "%secim%"=="2" goto build_backend
 if "%secim%"=="3" goto build_all
 if "%secim%"=="4" goto install_deps
-if "%secim%"=="5" goto clean_proj
-if "%secim%"=="6" exit
+if "%secim%"=="5" goto sync_installed
+if "%secim%"=="6" goto clean_proj
+if "%secim%"=="7" exit
 goto menu
 
 :install_deps
@@ -79,10 +81,14 @@ if exist "dist\miku-engine.exe" (
     if exist "release\Miku Tool Portable\resources" (
         copy /y "dist\miku-engine.exe" "release\Miku Tool Portable\resources\miku-engine.exe"
     )
+    if exist "%LOCALAPPDATA%\Programs\Miku Tool\resources" (
+        taskkill /F /T /IM miku-engine.exe 2>nul
+        copy /y "dist\miku-engine.exe" "%LOCALAPPDATA%\Programs\Miku Tool\resources\miku-engine.exe" 2>nul
+    )
 )
 if exist "build" rmdir /s /q build
 if exist "dist" rmdir /s /q dist
-echo [BASARILI] Backend derlendi ve release klasorune kopyalandi!
+echo [BASARILI] Backend derlendi ve release/kurulum klasorune kopyalandi!
 pause
 goto menu
 
@@ -127,11 +133,40 @@ echo [BASARILI] Yeni Miku Tool yukleyicisi release/ klasorunde olusturuldu!
 pause
 goto menu
 
+:sync_installed
+echo.
+echo [!] Kurulu Miku Tool guncelleniyor...
+if not exist "%LOCALAPPDATA%\Programs\Miku Tool" (
+    echo [UYARI] Kurulu Miku Tool klasoru bulunamadi: %LOCALAPPDATA%\Programs\Miku Tool
+    pause
+    goto menu
+)
+taskkill /F /T /IM "Miku Tool.exe" 2>nul
+taskkill /F /T /IM miku-engine.exe 2>nul
+timeout /t 1 /nobreak >nul
+echo [!] Vite ile frontend derleniyor...
+call npm run build
+if exist "dist" (
+    xcopy /y /e /i "dist" "%LOCALAPPDATA%\Programs\Miku Tool\resources\app\dist" >nul
+)
+if exist "main.js" (
+    copy /y "main.js" "%LOCALAPPDATA%\Programs\Miku Tool\resources\app\main.js" >nul
+)
+if exist "preload.js" (
+    copy /y "preload.js" "%LOCALAPPDATA%\Programs\Miku Tool\resources\app\preload.js" >nul
+)
+if exist "miku-engine.exe" (
+    copy /y "miku-engine.exe" "%LOCALAPPDATA%\Programs\Miku Tool\resources\miku-engine.exe" >nul
+)
+echo [BASARILI] Kurulu Miku Tool basariyla en son surume guncellendi!
+pause
+goto menu
+
 :clean_proj
 echo.
 echo [!] Gereksiz dosyalar ve gecici klasorler temizleniyor...
 taskkill /F /T /IM miku-engine.exe 2>nul
-del /f /q .cache credentials.json debug.log 2>nul
+del /f /q .cache debug.log 2>nul
 if exist ".pytest_cache" rmdir /s /q .pytest_cache
 if exist ".trash" rmdir /s /q .trash
 if exist "build" rmdir /s /q build

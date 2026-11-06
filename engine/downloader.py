@@ -2,6 +2,8 @@ import sys
 import os
 import json
 
+ALLOWED_COOKIE_BROWSERS = {'chrome', 'firefox', 'edge', 'opera', 'brave', 'chromium', 'vivaldi', 'safari'}
+
 def get_user_data_dir() -> str:
     """Evrensel kullanıcı veri dizinini döndürür."""
     if sys.platform == 'win32':
@@ -64,6 +66,32 @@ class YtdlpLogger:
         log_debug(f"[yt-dlp Warning] {msg}")
     def error(self, msg):
         log_debug(f"[yt-dlp Error] {msg}")
+
+
+def get_js_runtime_opts() -> dict:
+    """Configures JavaScript runtime (Node.js/Deno) and EJS solver for YouTube challenges."""
+    import shutil
+    node_path = shutil.which("node")
+    if not node_path:
+        for candidate in [
+            r"C:\Program Files\nodejs\node.exe",
+            r"C:\Program Files (x86)\nodejs\node.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\node\node.exe"),
+        ]:
+            if os.path.exists(candidate):
+                node_path = candidate
+                break
+
+    js_runtimes = {"deno": {}}
+    if node_path:
+        js_runtimes["node"] = {"path": node_path}
+    else:
+        js_runtimes["node"] = {}
+
+    return {
+        "js_runtimes": js_runtimes,
+        "remote_components": ["ejs:github", "ejs:npm"],
+    }
 
 
 def has_spotify_credentials() -> bool:
@@ -1177,8 +1205,8 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                         'extract_flat': True,  # Fast metadata-only search
                         'skip_download': True,
                     }
-                    if cookie_browser and cookie_browser != 'none':
-                        ydl_search_opts['cookiesfrombrowser'] = (cookie_browser,)
+                    if cookie_browser and cookie_browser.lower() in ALLOWED_COOKIE_BROWSERS:
+                        ydl_search_opts['cookiesfrombrowser'] = (cookie_browser.lower(),)
 
                     for query in queries:
                         # Skip bare isrc: queries — YouTube doesn’t support them
@@ -1326,13 +1354,12 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                     'concurrent_fragment_downloads': 5,
                     'ffmpeg_location': ffmpeg_path,
                     'logger': YtdlpLogger(),
-                    # EJS/deno challenge solver is configured via global yt-dlp config.
-                    # (~\AppData\Roaming\yt-dlp\config: --remote-components ejs:github)
                     'allow_unplayable_formats': False,
                 }
+                ydl_opts.update(get_js_runtime_opts())
                 if format_type == 'mp3':
                     # Audio only: best quality audio, converted to mp3
-                    ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best'
+                    ydl_opts['format'] = 'bestaudio/best'
                     ydl_opts['postprocessors'] = [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
@@ -1350,8 +1377,8 @@ def start_download(input_url, format_type='mp3', quality='best', output_dir='dow
                     ydl_opts['merge_output_format'] = 'mp4'
 
                 # Tarayıcı çerezleri ayarlanmışsa yt-dlp'ye aktar (özel/giriş gerektiren içerikler için)
-                if cookie_browser and cookie_browser != 'none':
-                    ydl_opts['cookiesfrombrowser'] = (cookie_browser,)
+                if cookie_browser and cookie_browser.lower() in ALLOWED_COOKIE_BROWSERS:
+                    ydl_opts['cookiesfrombrowser'] = (cookie_browser.lower(),)
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     # Risk Warning: If score is between absolute min (40) and safe (75)
@@ -1545,6 +1572,7 @@ def get_video_info(original_url):
         'playlist_items': '1', 
         'no_check_certificates': True,
     }
+    ydl_opts.update(get_js_runtime_opts())
     
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:

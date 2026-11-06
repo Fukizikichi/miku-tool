@@ -15,6 +15,7 @@ module.exports = {
   files: [
     "dist/**",
     "main.js",
+    "preload.js",
     "public/**"
   ],
   extraResources: [

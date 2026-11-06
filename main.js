@@ -122,9 +122,33 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      preload: path.join(__dirname, 'preload.js'),
       webSecurity: false,
     },
     icon: iconExists ? iconPath : undefined,
+  });
+
+  // Harici bağlantı ve pencere güvenliği:
+  // Harici web bağlantılarının Electron penceresi içinde açılmasını engelle, kullanıcının varsayılan tarayıcısına yönlendir.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http:') || url.startsWith('https:')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    // Sadece yerel React dev sunucusu veya paketlenmiş yerel dosyalara izin ver
+    if (!url.startsWith('http://localhost:5173') && !url.startsWith('file://')) {
+      event.preventDefault();
+      if (url.startsWith('http:') || url.startsWith('https:')) {
+        shell.openExternal(url);
+      }
+    }
+  });
+
+  mainWindow.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault();
   });
 
   // İçerik yükle
@@ -155,8 +179,7 @@ function createWindow() {
         });
       });
 
-    // (DevTools açma kodu kaldırıldı)
-  }
+      }
 
   // Kapat → tray
   mainWindow.on('close', (e) => {
@@ -167,19 +190,23 @@ function createWindow() {
     }
   });
 
-  // Clipboard izle
+  // Evrensel Pano (Clipboard) İzleyici
   let lastText = clipboard.readText();
-  const DOMAINS = ['youtube.com', 'youtu.be', 'spotify.com', 'soundcloud.com',
-    'tiktok.com', 'instagram.com', 'twitter.com', 'x.com', 'facebook.com', 'fb.watch',
-    'pinterest.com', 'pin.it', 'vimeo.com', 'reddit.com'];
   setInterval(() => {
     const text = clipboard.readText();
-    if (text !== lastText && text && DOMAINS.some(d => text.includes(d))) {
-      lastText = text;
-      const m = text.match(/https?:\/\/[^\s]+/i);
+    if (text && text !== lastText) {
+      const trimmed = text.trim();
+      const m = trimmed.match(/https?:\/\/[^\s]+/i);
       if (m) {
-        mainWindow?.webContents.send('clipboard-link', m[0]);
-        showNotification('Link Yakalandı!', 'Desteklenen bir medya linki kopyaladınız.');
+        try {
+          const u = new URL(m[0]);
+          const host = u.hostname.toLowerCase();
+          if (host && host !== 'localhost' && host !== '127.0.0.1' && !host.endsWith('.local')) {
+            lastText = text;
+            mainWindow?.webContents.send('clipboard-link', m[0]);
+            showNotification('Link Yakalandı!', 'İndirilebilir bir medya linki kopyaladınız.');
+          }
+        } catch {}
       }
     }
   }, 1000);

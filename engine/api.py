@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -44,14 +44,54 @@ except ModuleNotFoundError:
 
 CONFIG_FILE = os.path.join(USER_DATA_DIR, "config.json")
 
+ALLOWED_BROWSERS = {
+    'none', 'chrome', 'firefox', 'edge', 'opera', 'brave', 'chromium', 'vivaldi', 'safari'
+}
+
+_zeroconf_lock = threading.Lock()
+
 app = FastAPI()
+
+# Gelişmiş CORS yapılandırması: Sadece yerel istemcilere ve Electron'a izin ver
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^(http://(localhost|127\.0\.0\.1)(:\d+)?|file://.*|null)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def security_firewall_middleware(request: Request, call_next):
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    path = request.url.path
+
+    # LAN Güvenlik Duvarı:
+    # Telefonla QR kod üzerinden parça indirme (/api/files/*) haricinde, dış ağdan gelen tüm istekler engellenir.
+    # Yönetim, ayarlar, indirme başlatma veya log okuma dış ağa kesinlikle kapalıdır.
+    is_localhost = client_ip in ("127.0.0.1", "::1", "localhost")
+    if not is_localhost and not path.startswith("/api/files/"):
+        log_api(f"Güvenlik Uyarısı: Harici IP ({client_ip}) yetkisiz uç noktaya erişmeye çalıştı ({path}) - Engellendi.")
+        return JSONResponse(
+            {"error": "Erişim engellendi. Harici ağ erişimi sadece QR kod dosya indirme için geçerlidir."},
+            status_code=403
+        )
+
+    # Tarayıcı CSRF / Origin Koruması:
+    origin = request.headers.get("origin")
+    if origin and origin != "null":
+        allowed = any(
+            origin.startswith(prefix) for prefix in [
+                "http://localhost",
+                "http://127.0.0.1",
+                "file://",
+            ]
+        )
+        if not allowed and not path.startswith("/api/files/"):
+            log_api(f"Güvenlik Uyarısı: Yetkisiz Origin ({origin}) engellendi.")
+            return JSONResponse({"error": "Geçersiz veya yetkisiz Origin."}, status_code=403)
+
+    return await call_next(request)
 
 
 # Log dosyasını kullanıcının AppData dizinine yaz (kurulum sonrası tutarlı)
@@ -114,8 +154,38 @@ def get_config():
 
 
 def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def get_allowed_download_dirs() -> list[str]:
+    """Uygulamanın dosya okuma ve yazma iznine sahip olduğu güvenli indirme dizinlerini listeler."""
+    conf = get_config()
+    configured_path = conf.get('download_path', 'downloads')
+    dirs = []
+    if os.path.isabs(configured_path):
+        dirs.append(os.path.realpath(os.path.abspath(configured_path)))
+    else:
+        dirs.append(os.path.realpath(os.path.abspath(configured_path)))
+    dirs.append(os.path.realpath(os.path.abspath('downloads')))
+    dirs.append(os.path.realpath(os.path.abspath(os.path.join(os.path.expanduser('~'), 'Downloads'))))
+    seen = set()
+    unique_dirs = []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            unique_dirs.append(d)
+    return unique_dirs
+
+
+def is_safe_path(base_dir: str, target_path: str) -> bool:
+    """Hedef yolun belirtilen kök dizinin sınırları içinde olup olmadığını doğrular (Path Traversal önlemi)."""
+    try:
+        base = os.path.realpath(os.path.abspath(base_dir))
+        target = os.path.realpath(os.path.abspath(target_path))
+        return os.path.commonpath([base, target]) == base and target != base
+    except Exception:
+        return False
 
 
 def load_history():
@@ -182,9 +252,15 @@ class ConfigRequest(BaseModel):
 
 @app.post("/api/download")
 async def start_download(req: DownloadRequest):
-    log_api(f"İndirme isteği kuyruğa eklendi: {req.url}")
+    # Giriş doğrulaması (Input Sanitization)
+    fmt = 'mp3' if req.format == 'mp3' else 'mp4'
+    quality = 'standard' if req.quality == 'standard' else 'best'
+    browser = req.cookie_browser if req.cookie_browser in ALLOWED_BROWSERS else 'none'
+    safe_output_dir = downloader.resolve_output_dir(req.output_dir)
+
+    log_api(f"İndirme isteği kuyruğa eklendi: {req.url} ({fmt}, {quality})")
     downloader.add_to_queue(
-        req.url, req.format, req.quality, req.output_dir, req.cookie_browser
+        req.url, fmt, quality, safe_output_dir, browser
     )
     return {"status": "queued", "url": req.url}
 
@@ -217,6 +293,18 @@ async def get_info(url: str):
 
 @app.post("/api/metadata")
 async def edit_metadata(req: MetadataRequest):
+    if not req.file_path or '\0' in req.file_path:
+        return JSONResponse({"error": "Geçersiz dosya yolu."}, status_code=400)
+
+    # İzin verilen indirme klasörleri dışındaki sistem dosyalarını değiştirmeyi engelle
+    allowed_dirs = get_allowed_download_dirs()
+    if not any(is_safe_path(d, req.file_path) for d in allowed_dirs):
+        log_api(f"Güvenlik Uyarısı: İzin verilmeyen metadata düzenleme yolu: {req.file_path}")
+        return JSONResponse(
+            {"error": "Güvenlik hatası: Sadece indirme klasöründeki dosyaların etiketleri düzenlenebilir."},
+            status_code=403
+        )
+
     return tagger.edit_metadata(req.file_path, req.title, req.artist, req.album)
 
 
@@ -234,14 +322,22 @@ async def config_get():
 async def config_post(req: ConfigRequest):
     conf = get_config()
     if req.download_path:
-        conf['download_path'] = req.download_path
-    conf['cookie_browser'] = req.cookie_browser
+        clean_path = os.path.abspath(os.path.expanduser(req.download_path.strip()))
+        conf['download_path'] = clean_path
+
+    # Tarayıcı çerez beyaz listesi kontrolü
+    if req.cookie_browser in ALLOWED_BROWSERS:
+        conf['cookie_browser'] = req.cookie_browser
+    else:
+        conf['cookie_browser'] = 'none'
+
     # None gelen değerler mevcut geçerli kimlik bilgilerinin üzerine yazmamalı
     if req.spotify_client_id is not None:
-        conf['spotify_client_id'] = req.spotify_client_id
+        conf['spotify_client_id'] = req.spotify_client_id.strip() if req.spotify_client_id else None
     if req.spotify_client_secret is not None:
-        conf['spotify_client_secret'] = req.spotify_client_secret
-    conf['match_threshold'] = req.match_threshold
+        conf['spotify_client_secret'] = req.spotify_client_secret.strip() if req.spotify_client_secret else None
+    
+    conf['match_threshold'] = max(10, min(100, int(req.match_threshold or 60)))
     save_config(conf)
     return {"status": "success"}
 
@@ -327,9 +423,14 @@ async def update_ytdlp():
         with urllib.request.urlopen(whl_req) as response:
             whl_bytes = response.read()
             
-        # 3. Extract contents to PACKAGES_DIR
+        # 3. Extract contents to PACKAGES_DIR safely (Zip Slip koruması)
         with zipfile.ZipFile(io.BytesIO(whl_bytes)) as zip_ref:
-            zip_ref.extractall(PACKAGES_DIR)
+            target_base = os.path.realpath(os.path.abspath(PACKAGES_DIR))
+            for member in zip_ref.infolist():
+                member_path = os.path.realpath(os.path.abspath(os.path.join(target_base, member.filename)))
+                if not (member_path == target_base or member_path.startswith(target_base + os.sep)):
+                    raise Exception(f"Güvenlik uyarısı: Zip dosyası dizin atlama içeriyor: {member.filename}")
+            zip_ref.extractall(target_base)
             
         log_api(f"yt-dlp başarıyla {version} sürümüne güncellendi.")
         
@@ -418,36 +519,37 @@ async def clear_logs():
 
 @app.get("/api/files/{filename:path}")
 async def get_file(filename: str):
-    conf = get_config()
-    configured_path = conf.get('download_path', 'downloads')
+    # 1. Null byte ve boşluk kontrolü
+    if not filename or '\0' in filename:
+        return JSONResponse({"error": "Geçersiz dosya adı."}, status_code=400)
 
-    # Build candidate paths to search
-    candidate_dirs = []
+    # 2. Mutlak yol ve Windows sürücü harfi kontrolü (örn. C:\Windows\win.ini)
+    if os.path.isabs(filename) or (len(filename) > 1 and filename[1] == ':'):
+        log_api(f"Güvenlik Uyarısı: Mutlak yol ile sızma girişimi engellendi: {filename}")
+        return JSONResponse({"error": "Güvenlik hatası: Mutlak yol belirtilemez."}, status_code=400)
 
-    # 1. The configured download path (prefer absolute)
-    if os.path.isabs(configured_path):
-        candidate_dirs.append(configured_path)
-    else:
-        # Both relative and absolute resolved version
-        candidate_dirs.append(configured_path)
-        candidate_dirs.append(os.path.abspath(configured_path))
+    # 3. Dizin atlama (..) kontrolü (Path Traversal engeli)
+    clean_parts = [p for p in filename.replace('\\', '/').split('/') if p and p != '.']
+    if any(p == '..' for p in clean_parts):
+        log_api(f"Güvenlik Uyarısı: Dizin atlama (..) girişimi engellendi: {filename}")
+        return JSONResponse({"error": "Güvenlik hatası: Dizin atlama kullanılamaz."}, status_code=403)
 
-    # 2. Fallback: relative 'downloads' folder
-    candidate_dirs.append(os.path.abspath('downloads'))
+    safe_rel_path = os.path.join(*clean_parts) if clean_parts else ""
+    if not safe_rel_path:
+        return JSONResponse({"error": "Geçersiz dosya adı."}, status_code=400)
 
-    # 3. Fallback: user's system Downloads folder
-    candidate_dirs.append(os.path.join(os.path.expanduser('~'), 'Downloads'))
+    candidate_dirs = get_allowed_download_dirs()
 
     for directory in candidate_dirs:
-        file_path = os.path.join(directory, filename)
-        if os.path.exists(file_path) and os.path.isfile(file_path):
-            log_api(f"Dosya bulundu: {file_path}")
+        file_path = os.path.join(directory, safe_rel_path)
+        if is_safe_path(directory, file_path) and os.path.isfile(file_path):
+            log_api(f"Dosya güvenle sunuldu: {file_path}")
             return FileResponse(
                 file_path,
-                filename=os.path.basename(filename)
+                filename=os.path.basename(file_path)
             )
 
-    log_api(f"Dosya bulunamadı: {filename} (bakılan klasörler: {candidate_dirs})")
+    log_api(f"Dosya bulunamadı veya erişim engellendi: {filename}")
     return JSONResponse({"error": "Dosya bulunamadı", "filename": filename}, status_code=404)
 
 
@@ -517,96 +619,310 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
+# --- Search Optimization & Caching ---
+import requests
+import re
+
+_search_cache = {}
+_search_cache_lock = threading.Lock()
+_SEARCH_CACHE_TTL = 300  # 5 dakika onbellek
+_SEARCH_CACHE_MAX = 200
+
+# Persistent HTTP Sessions for ultra-low latency (<500ms)
+_s_yt = requests.Session()
+_s_yt.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Content-Type': 'application/json',
+})
+
+_s_sc = requests.Session()
+_s_sc.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+})
+
+_sc_client_id = "N5nHxilyZaG4XKY57pV0M6qx6JysgIFW"
+_sc_client_id_lock = threading.Lock()
+
+_ydl_yt_instance = None
+_ydl_sc_instance = None
+_ydl_yt_lock = threading.Lock()
+_ydl_sc_lock = threading.Lock()
+
+_cached_sp_client = None
+_cached_sp_keys = None
+
+def get_yt_search_ydl():
+    global _ydl_yt_instance
+    if _ydl_yt_instance is None:
+        opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'skip_download': True,
+            'socket_timeout': 4,
+        }
+        _ydl_yt_instance = downloader.yt_dlp.YoutubeDL(opts)
+    return _ydl_yt_instance
+
+def get_sc_search_ydl():
+    global _ydl_sc_instance
+    if _ydl_sc_instance is None:
+        opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'skip_download': True,
+            'socket_timeout': 4,
+        }
+        _ydl_sc_instance = downloader.yt_dlp.YoutubeDL(opts)
+    return _ydl_sc_instance
+
+def get_sc_client_id():
+    global _sc_client_id
+    if _sc_client_id:
+        return _sc_client_id
+    with _sc_client_id_lock:
+        if _sc_client_id:
+            return _sc_client_id
+        try:
+            html = _s_sc.get('https://soundcloud.com', timeout=3).text
+            scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', html)
+            for script in scripts[-4:]:
+                js = _s_sc.get(script, timeout=3).text
+                m = re.search(r'client_id:"([a-zA-Z0-9]{32})"', js)
+                if m:
+                    _sc_client_id = m.group(1)
+                    return _sc_client_id
+        except Exception:
+            pass
+        _sc_client_id = "N5nHxilyZaG4XKY57pV0M6qx6JysgIFW"
+        return _sc_client_id
+
+def get_spotify_search_client():
+    global _cached_sp_client, _cached_sp_keys
+    client_id, client_secret = downloader.get_spotify_credentials()
+    if client_id and client_secret:
+        if _cached_sp_client is None or _cached_sp_keys != (client_id, client_secret):
+            try:
+                auth_mgr = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
+                _cached_sp_client = spotipy.Spotify(auth_manager=auth_mgr, retries=0, status_retries=0)
+                _cached_sp_keys = (client_id, client_secret)
+            except Exception as e:
+                log_api(f"Spotify client olusturma hatasi: {e}")
+                return None
+        return _cached_sp_client
+    
+    token = downloader.get_spotify_token()
+    if token:
+        return spotipy.Spotify(auth=token, retries=0, status_retries=0)
+    return None
+
 # --- Search ---
 
 @app.get("/api/search")
 async def search_multi(q: str):
     if not q:
         return []
-    log_api(f"Çoklu arama: {q}")
+    clean_q = q.strip().lower()
+    if len(clean_q) < 2:
+        return []
+
+    # 1. Onbellek kontrolu (aninda yanit <1ms)
+    now = time.time()
+    with _search_cache_lock:
+        cached = _search_cache.get(clean_q)
+        if cached and (now - cached['time'] < _SEARCH_CACHE_TTL):
+            log_api(f"Arama onbellekten getirildi: {clean_q}")
+            return cached['data']
+
+    log_api(f"Hizli coklu arama: {q}")
     sp_results = []
     yt_results = []
     sc_results = []
 
     def search_yt():
+        # Once ultra hizli YouTube InnerTube API dene (~0.4s)
         try:
-            opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True, 'skip_download': True}
-            with downloader.yt_dlp.YoutubeDL(opts) as ydl:
-                res = ydl.extract_info(f"ytsearch3:{q}", download=False)
-                for entry in (res.get('entries') or []):
-                    if not entry: continue
-                    yt_results.append({
-                        "id": entry.get('id'),
-                        "title": entry.get('title'),
-                        "url": f"https://www.youtube.com/watch?v={entry.get('id')}",
-                        "thumbnail": f"https://i.ytimg.com/vi/{entry.get('id')}/hqdefault.jpg",
-                        "duration": entry.get('duration'),
-                        "uploader": entry.get('uploader'),
-                        "platform": "youtube"
-                    })
+            payload = {
+                'context': {
+                    'client': {
+                        'clientName': 'WEB',
+                        'clientVersion': '2.20240101.00.00',
+                        'hl': 'tr',
+                        'gl': 'TR'
+                    }
+                },
+                'query': q
+            }
+            r = _s_yt.post('https://www.youtube.com/youtubei/v1/search', json=payload, timeout=2.5)
+            if r.status_code == 200:
+                data = r.json()
+                contents = data.get('contents', {}).get('twoColumnSearchResultsRenderer', {}).get('primaryContents', {}).get('sectionListRenderer', {}).get('contents', [])
+                for section in contents:
+                    item_section = section.get('itemSectionRenderer', {}).get('contents', [])
+                    for item in item_section:
+                        if 'videoRenderer' in item:
+                            vr = item['videoRenderer']
+                            vid = vr.get('videoId')
+                            if not vid: continue
+                            title = vr.get('title', {}).get('runs', [{}])[0].get('text', '')
+                            channel = vr.get('ownerText', {}).get('runs', [{}])[0].get('text', 'YouTube')
+                            thumbs = vr.get('thumbnail', {}).get('thumbnails', [])
+                            thumb = thumbs[-1].get('url') if thumbs else f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                            
+                            duration_sec = None
+                            length_text = vr.get('lengthText', {}).get('simpleText')
+                            if length_text:
+                                parts = length_text.split(':')
+                                try:
+                                    if len(parts) == 2:
+                                        duration_sec = int(parts[0]) * 60 + int(parts[1])
+                                    elif len(parts) == 3:
+                                        duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                                except:
+                                    pass
+                            
+                            yt_results.append({
+                                "id": vid,
+                                "title": title,
+                                "url": f"https://www.youtube.com/watch?v={vid}",
+                                "thumbnail": thumb,
+                                "duration": duration_sec,
+                                "uploader": channel,
+                                "platform": "youtube"
+                            })
+                            if len(yt_results) >= 3:
+                                return
+                if yt_results:
+                    return
         except Exception as e:
-            log_api(f"YT Arama hatası: {e}")
+            log_api(f"YT InnerTube hatasi, ydl fallback: {e}")
+
+        # Fallback: yt-dlp flat extract
+        try:
+            ydl = get_yt_search_ydl()
+            with _ydl_yt_lock:
+                res = ydl.extract_info(f"ytsearch3:{q}", download=False)
+            for entry in (res.get('entries') or []):
+                if not entry: continue
+                entry_id = entry.get('id')
+                thumbs = entry.get('thumbnails') or []
+                thumb = thumbs[-1].get('url') if thumbs else entry.get('thumbnail')
+                if not thumb and entry_id:
+                    thumb = f"https://i.ytimg.com/vi/{entry_id}/hqdefault.jpg"
+                yt_results.append({
+                    "id": entry_id,
+                    "title": entry.get('title'),
+                    "url": f"https://www.youtube.com/watch?v={entry_id}",
+                    "thumbnail": thumb,
+                    "duration": entry.get('duration'),
+                    "uploader": entry.get('uploader'),
+                    "platform": "youtube"
+                })
+        except Exception as e:
+            log_api(f"YT ydl hatasi: {e}")
 
     def search_sc():
+        # Once dogrudan SoundCloud API v2 dene (~0.2s)
         try:
-            opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
-            with downloader.yt_dlp.YoutubeDL(opts) as ydl:
-                res = ydl.extract_info(f"scsearch3:{q}", download=False)
-                for entry in (res.get('entries') or []):
-                    if not entry: continue
-                    sc_results.append({
-                        "id": entry.get('id'),
-                        "title": entry.get('title'),
-                        "url": entry.get('webpage_url') or entry.get('url'),
-                        "thumbnail": entry.get('thumbnail'),
-                        "duration": entry.get('duration'),
-                        "uploader": entry.get('uploader'),
-                        "platform": "soundcloud"
-                    })
+            cid = get_sc_client_id()
+            if cid:
+                r = _s_sc.get('https://api-v2.soundcloud.com/search/tracks', params={'q': q, 'client_id': cid, 'limit': 3}, timeout=2.5)
+                if r.status_code == 200:
+                    data = r.json()
+                    for track in data.get('collection', []):
+                        artwork = track.get('artwork_url')
+                        if artwork:
+                            artwork = artwork.replace('-large', '-t500x500')
+                        else:
+                            artwork = track.get('user', {}).get('avatar_url')
+                        duration = (track.get('duration') or 0) / 1000.0
+                        sc_results.append({
+                            "id": str(track.get('id')),
+                            "title": track.get('title'),
+                            "url": track.get('permalink_url'),
+                            "thumbnail": artwork,
+                            "duration": duration,
+                            "uploader": track.get('user', {}).get('username', 'SoundCloud'),
+                            "platform": "soundcloud"
+                        })
+                        if len(sc_results) >= 3:
+                            return
+                    if sc_results:
+                        return
         except Exception as e:
-            log_api(f"SC Arama hatası: {e}")
+            log_api(f"SC API hatasi, ydl fallback: {e}")
+
+        # Fallback: yt-dlp flat extract
+        try:
+            ydl = get_sc_search_ydl()
+            with _ydl_sc_lock:
+                res = ydl.extract_info(f"scsearch3:{q}", download=False)
+            for entry in (res.get('entries') or []):
+                if not entry: continue
+                thumbs = entry.get('thumbnails') or []
+                thumb = thumbs[-1].get('url') if thumbs else entry.get('thumbnail')
+                sc_results.append({
+                    "id": entry.get('id'),
+                    "title": entry.get('title'),
+                    "url": entry.get('webpage_url') or entry.get('url'),
+                    "thumbnail": thumb,
+                    "duration": entry.get('duration'),
+                    "uploader": entry.get('uploader') or entry.get('artist') or "SoundCloud",
+                    "platform": "soundcloud"
+                })
+        except Exception as e:
+            log_api(f"SC ydl hatasi: {e}")
 
     def search_sp():
         try:
-            client_id, client_secret = downloader.get_spotify_credentials()
-            if client_id and client_secret:
-                sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-                    client_id=client_id, client_secret=client_secret
-                ))
-            else:
-                token = downloader.get_spotify_token()
-                if not token:
-                    return
-                sp = spotipy.Spotify(auth=token, retries=0, status_retries=0)
-
+            sp = get_spotify_search_client()
+            if not sp:
+                return
             res = sp.search(q=q, limit=3, type='track')
-            for track in res['tracks']['items']:
+            for track in res.get('tracks', {}).get('items', []):
                 sp_results.append({
                     "id": track['id'],
                     "title": f"{track['artists'][0]['name']} - {track['name']}",
                     "url": track['external_urls']['spotify'],
-                    "thumbnail": track['album']['images'][0]['url'] if track['album']['images'] else None,
-                    "duration": track['duration_ms'] / 1000,
-                    "uploader": track['album']['name'],
+                    "thumbnail": track['album']['images'][0]['url'] if track.get('album', {}).get('images') else None,
+                    "duration": track.get('duration_ms', 0) / 1000,
+                    "uploader": track.get('album', {}).get('name'),
                     "platform": "spotify"
                 })
         except Exception as e:
-            log_api(f"SP Arama hatası: {e}")
+            log_api(f"SP Arama hatasi: {e}")
+
+    async def run_search(fn, name):
+        try:
+            await asyncio.wait_for(asyncio.to_thread(fn), timeout=2.8)
+        except asyncio.TimeoutError:
+            log_api(f"{name} arama zaman asimina ugradi (2.8s)")
+        except Exception as e:
+            log_api(f"{name} arama hatasi: {e}")
 
     await asyncio.gather(
-        asyncio.to_thread(search_yt),
-        asyncio.to_thread(search_sc),
-        asyncio.to_thread(search_sp),
+        run_search(search_yt, "YouTube"),
+        run_search(search_sc, "SoundCloud"),
+        run_search(search_sp, "Spotify")
     )
 
-    # Spotify önce, sonra YouTube, sonra SoundCloud
-    return sp_results + yt_results + sc_results
+    combined = sp_results + yt_results + sc_results
+    if combined:
+        with _search_cache_lock:
+            if len(_search_cache) >= _SEARCH_CACHE_MAX:
+                oldest_key = min(_search_cache.keys(), key=lambda k: _search_cache[k]['time'])
+                _search_cache.pop(oldest_key, None)
+            _search_cache[clean_q] = {'time': now, 'data': combined}
 
-
+    return combined
 # --- Spotify Connect (ZeroConf) ---
 
 @app.post("/api/spotify-connect")
 async def connect_spotify():
+    if not _zeroconf_lock.acquire(blocking=False):
+        return {"status": "error", "message": "Zaten aktif bir eşleşme oturumu çalışıyor. Lütfen mevcut oturumun tamamlanmasını bekleyin."}
+
     def run_zeroconf():
         from librespot.core import Session
         from librespot.zeroconf import ZeroconfServer
@@ -654,10 +970,14 @@ async def connect_spotify():
             with open(cred_file, 'w', encoding='utf-8') as f:
                 f.write(stored_decoded)
 
-            # Also copy to Zotify's AppData path
-            zotify_dir = Path.home() / 'AppData' / 'Roaming' / 'Zotify'
-            zotify_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cred_file, zotify_dir / 'credentials.json')
+            # Zotify uyumluluğu için AppData kopyası (Windows)
+            if sys.platform == 'win32':
+                try:
+                    zotify_dir = Path.home() / 'AppData' / 'Roaming' / 'Zotify'
+                    zotify_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cred_file, zotify_dir / 'credentials.json')
+                except Exception:
+                    pass
 
             log_api(f"ZeroConf kimlik bilgileri kaydedildi: {cred_file}")
             # Eski Librespot oturumunu ve token önbelleğini temizle
@@ -675,6 +995,10 @@ async def connect_spotify():
                     server.close()
                 except Exception:
                     pass
+            try:
+                _zeroconf_lock.release()
+            except Exception:
+                pass
 
     try:
         await asyncio.to_thread(run_zeroconf)

@@ -2,26 +2,42 @@
 import os
 import sys
 import imageio_ffmpeg
+from PyInstaller.utils.hooks import collect_all
 
 ffmpeg_bin_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
+
+datas = [(os.path.join(ffmpeg_bin_dir, '*'), 'imageio_ffmpeg/binaries')]
+binaries = []
+hiddenimports = [
+    'uvicorn.logging',
+    'uvicorn.loops.auto',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.websockets.auto',
+    'uvicorn.lifespan.on',
+    'engineio.async_drivers.threading',
+    'websockets',
+    'syncedlyrics',
+    'spotipy',
+    'mutagen',
+    'librespot',
+    'brotli',
+    'curl_cffi',
+]
+
+try:
+    c_datas, c_binaries, c_hidden = collect_all('curl_cffi')
+    datas += c_datas
+    binaries += c_binaries
+    hiddenimports += c_hidden
+except Exception as e:
+    pass
 
 a = Analysis(
     ['engine/api.py'],
     pathex=[],
-    datas=[(os.path.join(ffmpeg_bin_dir, '*'), 'imageio_ffmpeg/binaries')],
-    hiddenimports=[
-        'uvicorn.logging',
-        'uvicorn.loops.auto',
-        'uvicorn.protocols.http.auto',
-        'uvicorn.protocols.websockets.auto',
-        'uvicorn.lifespan.on',
-        'engineio.async_drivers.threading',
-        'websockets',
-        'syncedlyrics',
-        'spotipy',
-        'mutagen',
-        'librespot',
-    ],
+    datas=datas,
+    binaries=binaries,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
